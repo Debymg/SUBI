@@ -1,0 +1,235 @@
+/* ============================================
+   Dental Chart (Realistic Arch Layout) Styles
+   ============================================ */
+
+.dental {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  --tooth-fill: var(--color-bg-secondary);
+  --tooth-stroke: var(--color-border-secondary);
+}
+
+/* ── Header ── */
+.dental__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dental__title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.dental__count {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--color-accent-primary);
+  background-color: var(--color-accent-primary-subtle);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+.dental__help {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+  margin-top: -4px;
+}
+
+.dental__help strong {
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+/* ── Mouth Layout ── */
+.dental__mouth-wrapper {
+  background-color: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg) var(--space-md);
+  display: flex;
+  justify-content: center;
+  overflow: hidden; /* Hide any overflow if teeth go too wide */
+}
+
+.dental__mouth {
+  position: relative;
+  width: 100%;
+  max-width: 500px;
+  aspect-ratio: 500 / 400; /* viewBox coordinates: 500x400 */
+}
+
+/* Visual guides */
+.dental__midline {
+  position: absolute;
+  top: 5%;
+  bottom: 5%;
+  left: 50%;
+  width: 1px;
+  border-left: 1px dashed var(--color-border-primary);
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dental__label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+}
+
+.dental__label--upper {
+  top: 35%;
+}
+
+.dental__label--lower {
+  bottom: 35%;
+}
+
+/* ── Tooth Button ── */
+.tooth-btn {
+  position: absolute;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  z-index: 1;
+  transform-origin: center;
+  transition: transform var(--transition-fast);
+}
+
+.tooth-btn:hover {
+  z-index: 2;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1));
+}
+
+/* We don't scale on hover because of absolute positioning + transform translation, 
+   we just add brightness and shadow to indicate interaction */
+.tooth-btn:hover .tooth-svg {
+  filter: brightness(1.2);
+}
+
+.tooth-svg {
+  display: block;
+  transition: filter var(--transition-fast);
+}
+
+.tooth-btn__num {
+  position: absolute;
+  top: 100%; /* Placed just below the root of the tooth */
+  left: 50%;
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transform-origin: center;
+  transition: color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.tooth-btn:hover .tooth-btn__num {
+  color: var(--color-text-primary);
+}
+
+/* Status specific */
+.tooth-btn--missing .tooth-btn__num { color: #EF4444; }
+.tooth-btn--restored .tooth-btn__num { color: #F59E0B; }
+.tooth-btn--prosthetic .tooth-btn__num { color: #3B82F6; }
+
+/* ── Tooltip ── */
+.dental__tooltip {
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  padding: 6px 12px;
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-md);
+  margin-top: -4px;
+  box-shadow: var(--shadow-sm);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+  min-height: 28px; /* Ensure consistent height even when empty */
+}
+
+.dental__tooltip--visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.dental__tooltip strong {
+  color: var(--color-text-primary);
+}
+
+/* ── Legend ── */
+.dental__legend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  padding-top: var(--space-sm);
+}
+
+.dental__legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+}
+
+.dental__legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border-primary);
+  background-color: var(--color-bg-secondary);
+}
+
+.dental__legend-swatch--missing {
+  border-color: #EF4444;
+  background-image: linear-gradient(45deg, transparent 40%, #EF4444 40%, #EF4444 60%, transparent 60%), linear-gradient(-45deg, transparent 40%, #EF4444 40%, #EF4444 60%, transparent 60%);
+}
+
+.dental__legend-swatch--restored {
+  background-color: rgba(245, 158, 11, 0.2);
+  border-color: #F59E0B;
+}
+
+.dental__legend-swatch--prosthetic {
+  background-color: rgba(59, 130, 246, 0.2);
+  border-color: #3B82F6;
+}
+
+/* ── Responsive ── */
+@media (max-width: 480px) {
+  .dental__mouth-wrapper {
+    padding: var(--space-md) var(--space-sm);
+  }
+  
+  .tooth-btn__num {
+    font-size: 0.5rem;
+  }
+  
+  .dental__legend {
+    gap: var(--space-md);
+  }
+  
+  .dental__label {
+    font-size: 0.55rem;
+  }
+}
