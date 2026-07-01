@@ -1,16 +1,137 @@
-import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useTheme } from '../context/ThemeContext';
-import DentalChart from '../components/DentalChart';
+import TabForense from './tabs/TabForense';
+import TabTrazabilidad from './tabs/TabTrazabilidad';
 import './DashboardPage.css';
 
 const SEX_LABEL = { male: 'Masculino', female: 'Femenino', unknown: 'Desconocido' };
 
+// ── Lightbox con Portal (evita problemas con transform/animation de ancestros) ─
+function MatchLightbox({ urls, idx: initialIdx, onClose }) {
+  const [idx, setIdx] = useState(initialIdx);
+  useEffect(() => {
+    const h = (e) => {
+      if (e.key === 'Escape')      onClose();
+      if (e.key === 'ArrowRight')  setIdx(i => Math.min(i + 1, urls.length - 1));
+      if (e.key === 'ArrowLeft')   setIdx(i => Math.max(i - 1, 0));
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose, urls.length]);
+  return createPortal(
+    <div className="lb-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <button className="lb-close" onClick={onClose} aria-label="Cerrar">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <button className="lb-nav lb-nav--prev" onClick={() => setIdx(i => i - 1)} disabled={idx === 0} aria-label="Anterior">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <img src={urls[idx]} alt={`Fotografía ${idx + 1}`} className="lb-img" />
+      <button className="lb-nav lb-nav--next" onClick={() => setIdx(i => i + 1)} disabled={idx === urls.length - 1} aria-label="Siguiente">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+      {urls.length > 1 && <p className="lb-counter">{idx + 1} / {urls.length}</p>}
+    </div>,
+    document.body
+  );
+}
+
 function ScoreBadge({ pct }) {
   const color = pct >= 70 ? 'green' : pct >= 40 ? 'amber' : 'red';
   return <span className={`score-badge score-badge--${color}`}>{pct}%</span>;
+}
+
+// ── Normaliza texto para comparación sin tildes ni puntuación ─────────────────
+function normalizeWords(s) {
+  return (s || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .split(/\W+/).filter(w => w.length > 3);
+}
+
+/**
+ * Calcula un puntaje de coincidencia [0-100] entre un reporte y un expediente.
+ *
+ * Pesos:
+ *   Sexo:    filtro duro — si ambos son conocidos y difieren → 0
+ *   Edad:    45 pts según el ratio de solapamiento de rangos etarios
+ *   Dental:  20 pts si ambos tienen registros dentales (pendiente de lab)
+ *   Marcas:  35 pts según solapamiento de palabras clave en señas particulares
+ *
+ * Umbral mínimo para crear candidato: 25 pts
+ */
+function computeMatchScore(report, record) {
+  const breakdown = { sex: false, age: false, dental: false, marks: false, ageOverlapPct: 0 };
+
+  // Sexo: filtro duro
+  const rSex   = report.sex;
+  const recSex = record.sex;
+  const sexKnown = rSex !== 'unknown' && recSex !== 'unknown';
+  if (sexKnown && rSex !== recSex) return { score: 0, breakdown };
+  breakdown.sex = !sexKnown || rSex === recSex;
+
+  let score = 0;
+
+  // Edad: solapamiento de rangos (45 pts)
+  const rMin  = report.approx_age_min  ?? null;
+  const rMax  = report.approx_age_max  ?? rMin;
+  const recMin = record.approx_age_min ?? null;
+  const recMax = record.approx_age_max ?? recMin;
+  if (rMin !== null && recMin !== null) {
+    const loOverlap = Math.max(rMin, recMin);
+    const hiOverlap = Math.min(rMax ?? rMin, recMax ?? recMin);
+    if (hiOverlap >= loOverlap) {
+      const loUnion = Math.min(rMin, recMin);
+      const hiUnion = Math.max(rMax ?? rMin, recMax ?? recMin);
+      const ratio = (hiOverlap - loOverlap + 1) / (hiUnion - loUnion + 1 || 1);
+      score += Math.round(Math.min(ratio, 1) * 45);
+      breakdown.age = true;
+      breakdown.ageOverlapPct = Math.round(ratio * 100);
+    }
+  }
+
+  // Dental: potencial para verificación de laboratorio (20 pts)
+  if (report.has_dental_records && record.has_dental_chart) {
+    score += 20;
+    breakdown.dental = true;
+  }
+
+  // Marcas distintivas: coincidencia de palabras clave (35 pts)
+  if (report.distinguishing_marks && record.distinguishing_marks) {
+    const rWords  = normalizeWords(report.distinguishing_marks);
+    const recSet  = new Set(normalizeWords(record.distinguishing_marks));
+    if (rWords.length > 0 && recSet.size > 0) {
+      const matched = rWords.filter(w => recSet.has(w)).length;
+      const ratio   = matched / Math.max(rWords.length, recSet.size);
+      const marksScore = Math.round(Math.min(ratio, 1) * 35);
+      if (marksScore > 0) {
+        score += marksScore;
+        breakdown.marks = true;
+      }
+    }
+  }
+
+  return { score: Math.min(score, 100), breakdown };
+}
+
+// Helpers para los indicadores visuales de la tarjeta de coincidencia
+function ageOverlapsUI(report, record) {
+  const rMin  = report?.approx_age_min ?? null;
+  const rMax  = report?.approx_age_max ?? rMin;
+  const recMin = record?.approx_age_min ?? null;
+  const recMax = record?.approx_age_max ?? recMin;
+  if (rMin === null || recMin === null) return null;
+  return Math.min(rMax ?? rMin, recMax ?? recMin) >= Math.max(rMin, recMin);
+}
+
+function marksOverlapUI(report, record) {
+  if (!report?.distinguishing_marks || !record?.distinguishing_marks) return false;
+  const rWords = normalizeWords(report.distinguishing_marks);
+  const recSet = new Set(normalizeWords(record.distinguishing_marks));
+  return rWords.some(w => recSet.has(w));
 }
 
 // ─── TAB: RESUMEN ────────────────────────────────────────────────────────────
@@ -20,13 +141,35 @@ function TabResumen({ stats, onGoTo }) {
       {stats.pendingMatches > 0 && (
         <div className="alert-banner">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          <span>Hay <strong>{stats.pendingMatches}</strong> candidatos pendientes de revisión.</span>
-          <button className="alert-banner__btn" onClick={() => onGoTo('candidatos')}>Revisar ahora →</button>
+          <span>Hay <strong>{stats.pendingMatches}</strong> coincidencias pendientes de revisión.</span>
+          <button className="alert-banner__btn" onClick={() => onGoTo('busqueda')}>Revisar ahora →</button>
         </div>
       )}
-      <div className="empty-module">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
-        <p>Usa las pestañas para gestionar el sistema.</p>
+      <div className="workflow-guide" style={{ marginTop: 'var(--space-lg)' }}>
+        <p className="workflow-guide__title">Flujo del Sistema</p>
+        <div className="pipeline-steps">
+          <div className="pipeline-card">
+            <div className="pipeline-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <p className="pipeline-title">1. Ingreso de Datos</p>
+            <p className="pipeline-desc">Forenses registran hallazgos y familiares reportan desaparecidos.</p>
+          </div>
+          <div className="pipeline-card">
+            <div className="pipeline-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+            </div>
+            <p className="pipeline-title">2. Cruce Automático</p>
+            <p className="pipeline-desc">El algoritmo compara perfiles y genera un % de similitud al instante.</p>
+          </div>
+          <div className="pipeline-card">
+            <div className="pipeline-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+            <p className="pipeline-title">3. Revisión y Cierre</p>
+            <p className="pipeline-desc">El perito valida el match positivo y el sistema notifica a la familia.</p>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -41,13 +184,29 @@ function TabBusqueda({ userId }) {
   const [notes, setNotes] = useState('');
   const [acting, setActing] = useState(false);
   const [photoUrls, setPhotoUrls] = useState({});
+  // forensePhotos: { [matchId]: 'loading' | 'none' | string[] }
+  const [forensePhotos, setForensePhotos] = useState({});
+  // lightbox: { urls: string[], idx: number } | null
+  const [lightbox, setLightbox] = useState(null);
+  const [analysisStatus, setAnalysisStatus] = useState(null);
 
-  const fetchPhoto = useCallback(async (ownerTable, ownerId, key) => {
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setLightbox(null);
+      if (e.key === 'ArrowRight') setLightbox(lb => lb && lb.idx < lb.urls.length - 1 ? { ...lb, idx: lb.idx + 1 } : lb);
+      if (e.key === 'ArrowLeft')  setLightbox(lb => lb && lb.idx > 0 ? { ...lb, idx: lb.idx - 1 } : lb);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightbox]);
+
+  const fetchReportPhoto = useCallback(async (reportId, key) => {
     const { data } = await supabase
       .from('media')
       .select('storage_path')
-      .eq('owner_table', ownerTable)
-      .eq('owner_id', ownerId)
+      .eq('owner_table', 'missing_report')
+      .eq('owner_id', reportId)
       .eq('kind', 'face')
       .order('created_at', { ascending: false })
       .limit(1)
@@ -58,13 +217,37 @@ function TabBusqueda({ userId }) {
     }
   }, []);
 
+  const revealForensePhotos = async (matchId, recordId) => {
+    setForensePhotos(prev => ({ ...prev, [matchId]: 'loading' }));
+    const { data } = await supabase
+      .from('media')
+      .select('storage_path')
+      .eq('owner_table', 'unidentified_record')
+      .eq('owner_id', recordId)
+      .eq('kind', 'evidence')
+      .order('created_at', { ascending: true });
+
+    if (!data || data.length === 0) {
+      setForensePhotos(prev => ({ ...prev, [matchId]: 'none' }));
+      return;
+    }
+    const urls = await Promise.all(
+      data.map(async (item) => {
+        const { data: s } = await supabase.storage.from('evidence').createSignedUrl(item.storage_path, 3600);
+        return s?.signedUrl || null;
+      })
+    );
+    setForensePhotos(prev => ({ ...prev, [matchId]: urls.filter(Boolean) }));
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     setPhotoUrls({});
+    setForensePhotos({});
     const { data } = await supabase
       .from('match_candidates')
       .select(`
-        id, match_percentage, status, reviewer_notes, created_at,
+        id, match_percentage, status, reviewer_notes, ai_notes, created_at,
         report:missing_reports!report_id (
           id, full_name, national_id, sex, approx_age_min, approx_age_max,
           distinguishing_marks, has_dental_records,
@@ -83,10 +266,9 @@ function TabBusqueda({ userId }) {
     setLoading(false);
 
     for (const m of (data || [])) {
-      if (m.report?.id)  fetchPhoto('missing_report', m.report.id, `${m.id}_r`);
-      if (m.record?.id) fetchPhoto('unidentified_record', m.record.id, `${m.id}_u`);
+      if (m.report?.id) fetchReportPhoto(m.report.id, `${m.id}_r`);
     }
-  }, [filter, fetchPhoto]);
+  }, [filter, fetchReportPhoto]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -119,14 +301,52 @@ function TabBusqueda({ userId }) {
 
   const handleAnalizar = async () => {
     setLoading(true);
-    // Simular un escaneo por ahora, luego se conectará a la BD
-    setTimeout(() => {
-      load();
-    }, 1500);
+    setAnalysisStatus('Calculando candidatos...');
+    try {
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const anonKey     = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      if (!supabaseUrl || !anonKey) throw new Error('Variables de entorno de Supabase no configuradas');
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token || anonKey;
+
+      const res = await fetch(`${supabaseUrl}/functions/v1/analyze-match`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${token}`,
+          'apikey':         anonKey,
+        },
+      });
+
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || `Error ${res.status}`);
+
+      // La Edge Function ya guardó los candidatos y notificó a Make.
+      // Make llama a la IA en segundo plano y actualiza ai_notes.
+      const msg = result.candidates_found > 0
+        ? `✅ ${result.candidates_found} candidatos analizados · ${result.ai_enhanced ?? 0} potenciados con IA`
+        : 'Sin nuevos candidatos';
+      setAnalysisStatus(msg);
+      setTimeout(() => { setAnalysisStatus(null); load(); }, 4000);
+    } catch (err) {
+      console.error('Error en análisis:', err);
+      setAnalysisStatus(`Error: ${err.message}`);
+      setLoading(false);
+    }
   };
 
   return (
     <div className="tab-section">
+      {/* ── Lightbox visor de fotos forenses ── */}
+      {lightbox && (
+        <MatchLightbox
+          urls={lightbox.urls}
+          idx={lightbox.idx}
+          onClose={() => setLightbox(null)}
+        />
+      )}
+
       <div className="analysis-panel">
         <div className="analysis-panel__left">
           <svg className="analysis-panel__glyph" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -137,18 +357,23 @@ function TabBusqueda({ userId }) {
             <h2 className="analysis-panel__title">Búsqueda de coincidencias</h2>
           </div>
         </div>
-        <button className="analysis-panel__btn" onClick={handleAnalizar} disabled={loading}>
-          {loading ? (
-            <><span className="spinner-sm" /><span>Procesando</span></>
-          ) : (
-            <>
-              <span>Iniciar análisis</span>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
-              </svg>
-            </>
+        <div className="analysis-panel__right">
+          {analysisStatus && (
+            <span className="analysis-status">{analysisStatus}</span>
           )}
-        </button>
+          <button className="analysis-panel__btn" onClick={handleAnalizar} disabled={loading}>
+            {loading ? (
+              <><span className="spinner-sm" /><span>{analysisStatus || 'Procesando'}</span></>
+            ) : (
+              <>
+                <span>Iniciar análisis IA</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+                </svg>
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       <div className="tab-toolbar">
@@ -205,12 +430,47 @@ function TabBusqueda({ userId }) {
                 {/* Center: indicators */}
                 <div className="match-center">
                   <div className="match-indicators">
-                    <span className={m.report?.sex === m.record?.sex ? 'ind ind--ok' : 'ind ind--no'}>
-                      {m.report?.sex === m.record?.sex ? '✓' : '✗'} Sexo
-                    </span>
-                    <span className="ind ind--ok">✓ Edad</span>
-                    {m.report?.has_dental_records && m.record?.has_dental_chart && (
-                      <span className="ind ind--ok">✓ Dental</span>
+                    {/* Sexo */}
+                    {(() => {
+                      const rSex   = m.report?.sex;
+                      const recSex = m.record?.sex;
+                      const known  = rSex !== 'unknown' && recSex !== 'unknown';
+                      const ok     = !known || rSex === recSex;
+                      return (
+                        <span className={ok ? 'ind ind--ok' : 'ind ind--no'}>
+                          {ok ? '✓' : '✗'} Sexo
+                        </span>
+                      );
+                    })()}
+
+                    {/* Edad */}
+                    {(() => {
+                      const overlap = ageOverlapsUI(m.report, m.record);
+                      if (overlap === null) return (
+                        <span className="ind ind--na">— Edad</span>
+                      );
+                      return (
+                        <span className={overlap ? 'ind ind--ok' : 'ind ind--no'}>
+                          {overlap ? '✓' : '✗'} Edad
+                        </span>
+                      );
+                    })()}
+
+                    {/* Dental */}
+                    {(m.report?.has_dental_records || m.record?.has_dental_chart) && (
+                      <span className={
+                        m.report?.has_dental_records && m.record?.has_dental_chart
+                          ? 'ind ind--ok' : 'ind ind--no'
+                      }>
+                        {m.report?.has_dental_records && m.record?.has_dental_chart ? '✓' : '✗'} Dental
+                      </span>
+                    )}
+
+                    {/* Marcas */}
+                    {(m.report?.distinguishing_marks || m.record?.distinguishing_marks) && (
+                      <span className={marksOverlapUI(m.report, m.record) ? 'ind ind--ok' : 'ind ind--no'}>
+                        {marksOverlapUI(m.report, m.record) ? '✓' : '✗'} Marcas
+                      </span>
                     )}
                   </div>
                 </div>
@@ -218,11 +478,51 @@ function TabBusqueda({ userId }) {
                 {/* Right: forensic record */}
                 <div className="match-side">
                   <p className="match-side__tag">Registro Forense</p>
-                  <div className="match-photo">
-                    {photoUrls[`${m.id}_u`]
-                      ? <img src={photoUrls[`${m.id}_u`]} alt="foto forense" />
-                      : <div className="match-photo__empty">Sin foto</div>}
-                  </div>
+                  {/* Fotos forenses: ocultas por defecto, contenido potencialmente sensible */}
+                  {forensePhotos[m.id] === 'loading' ? (
+                    <div className="match-photo"><div className="match-photo__empty"><span className="spinner-sm" /></div></div>
+                  ) : forensePhotos[m.id] === 'none' ? (
+                    <div className="match-photo"><div className="match-photo__empty">Sin foto</div></div>
+                  ) : Array.isArray(forensePhotos[m.id]) ? (
+                    <div style={{ position: 'relative', display: 'inline-block' }}>
+                      <button
+                        type="button"
+                        onClick={() => setForensePhotos(prev => ({ ...prev, [m.id]: undefined }))}
+                        style={{
+                          position: 'absolute', top: '-8px', right: '-8px', width: '22px', height: '22px',
+                          background: 'var(--color-bg-elevated)', border: '1px solid var(--color-border-primary)',
+                          borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          cursor: 'pointer', zIndex: 5, color: 'var(--color-text-secondary)', fontSize: '10px'
+                        }}
+                        title="Ocultar fotos"
+                      >
+                        ✕
+                      </button>
+                      <div className="match-forense-photos">
+                        {forensePhotos[m.id].map((url, i) => (
+                          <img
+                            key={i}
+                            src={url}
+                            alt={`foto forense ${i + 1}`}
+                            className="match-forense-photo"
+                            onClick={() => setLightbox({ urls: forensePhotos[m.id], idx: i })}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="match-photo">
+                      <button
+                        type="button"
+                        className="match-photo__reveal"
+                        onClick={() => revealForensePhotos(m.id, m.record.id)}
+                        title="Las fotos pueden contener contenido sensible"
+                      >
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        Ver fotos
+                      </button>
+                    </div>
+                  )}
                   <p className="match-name">{m.record?.case_code}</p>
                   <p className="match-detail">{SEX_LABEL[m.record?.sex]} · {m.record?.approx_age_min ?? '?'}–{m.record?.approx_age_max ?? '?'} años</p>
                   <p className="match-detail">📍 {m.record?.found_location || 'Ubicación desconocida'}</p>
@@ -244,6 +544,11 @@ function TabBusqueda({ userId }) {
                     </span>
                   ))}
                 </div>
+              )}
+
+              {/* AI analysis notes */}
+              {m.ai_notes && (
+                <div className="ai-notes">🤖 <strong>Análisis IA:</strong> {m.ai_notes}</div>
               )}
 
               {/* Reviewer notes */}
@@ -286,179 +591,6 @@ function TabBusqueda({ userId }) {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-// ─── TAB: REGISTRO FORENSE ───────────────────────────────────────────────────
-function TabForense({ userId }) {
-  const fileRef = useRef(null);
-  const [form, setForm] = useState({
-    sex: 'unknown', approx_age_min: '', approx_age_max: '',
-    distinguishing_marks: '', found_location: '', found_at: '', notes: '',
-  });
-  const [dentalData, setDentalData] = useState({});
-  const [photo, setPhoto] = useState(null);
-  const [photoPreview, setPhotoPreview] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [savedCode, setSavedCode] = useState(null);
-  const [errors, setErrors] = useState({});
-
-  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
-
-  const handlePhoto = (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
-    if (f.size > 5 * 1024 * 1024) { setErrors(p => ({ ...p, photo: 'Máximo 5 MB' })); return; }
-    setPhoto(f);
-    const r = new FileReader();
-    r.onloadend = () => setPhotoPreview(r.result);
-    r.readAsDataURL(f);
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    const errs = {};
-    if (!form.found_location.trim()) errs.found_location = 'Ingrese la ubicación';
-    setErrors(errs);
-    if (Object.keys(errs).length) return;
-
-    setSaving(true);
-    setSavedCode(null);
-    try {
-      const hasDental = Object.keys(dentalData).length > 0;
-      const { data: rec, error } = await supabase
-        .from('unidentified_records')
-        .insert({
-          created_by: userId,
-          sex: form.sex,
-          approx_age_min: form.approx_age_min ? parseInt(form.approx_age_min) : null,
-          approx_age_max: form.approx_age_max ? parseInt(form.approx_age_max) : null,
-          distinguishing_marks: form.distinguishing_marks.trim() || null,
-          found_location: form.found_location.trim(),
-          found_at: form.found_at || null,
-          notes: form.notes.trim() || null,
-          dental_chart: hasDental ? dentalData : null,
-          has_dental_chart: hasDental,
-        })
-        .select('id, case_code')
-        .single();
-      if (error) throw error;
-
-      if (photo) {
-        const ext = photo.name.split('.').pop();
-        const path = `forensic/${Date.now()}_${rec.case_code}.${ext}`;
-        const { error: upErr } = await supabase.storage.from('evidence').upload(path, photo);
-        if (!upErr) {
-          await supabase.from('media').insert({
-            owner_table: 'unidentified_record', owner_id: rec.id,
-            storage_path: path, kind: 'face',
-          });
-        }
-      }
-
-      // await supabase.rpc('rebuild_candidates_for_record', { p_record_id: rec.id }); // Desactivado para estructura manual
-
-      setSavedCode(rec.case_code);
-      setForm({ sex: 'unknown', approx_age_min: '', approx_age_max: '', distinguishing_marks: '', found_location: '', found_at: '', notes: '' });
-      setDentalData({});
-      setPhoto(null); setPhotoPreview(null);
-      if (fileRef.current) fileRef.current.value = '';
-    } catch (err) {
-      setErrors({ general: err.message });
-    }
-    setSaving(false);
-  };
-
-  return (
-    <div className="tab-section">
-      <div className="section-header">
-        <h2 className="section-title">Registrar hallazgo</h2>
-        <p className="section-desc">Complete los datos disponibles. El sistema cruzará automáticamente con todos los reportes activos.</p>
-      </div>
-
-      {savedCode && (
-        <div className="success-banner">
-          ✓ Registro guardado en archivo: <strong>{savedCode}</strong>.
-        </div>
-      )}
-      {errors.general && <div className="error-banner">{errors.general}</div>}
-
-      <form className="forense-form" onSubmit={handleSubmit} noValidate>
-        <div className="form-row-3">
-          <div className="fgroup">
-            <label>Sexo</label>
-            <select value={form.sex} onChange={e => set('sex', e.target.value)}>
-              <option value="unknown">Desconocido</option>
-              <option value="male">Masculino</option>
-              <option value="female">Femenino</option>
-            </select>
-          </div>
-          <div className="fgroup">
-            <label>Edad estimada mín.</label>
-            <input type="number" min="0" max="120" placeholder="—"
-              value={form.approx_age_min} onChange={e => set('approx_age_min', e.target.value)} />
-          </div>
-          <div className="fgroup">
-            <label>Edad estimada máx.</label>
-            <input type="number" min="0" max="120" placeholder="—"
-              value={form.approx_age_max} onChange={e => set('approx_age_max', e.target.value)} />
-          </div>
-        </div>
-
-        <div className="form-row-2">
-          <div className="fgroup fgroup--grow">
-            <label>Lugar del hallazgo <span className="req">*</span></label>
-            <input type="text" placeholder="Ej: Sector El Silencio, Caracas"
-              value={form.found_location}
-              className={errors.found_location ? 'input--error' : ''}
-              onChange={e => { set('found_location', e.target.value); setErrors(p => ({ ...p, found_location: '' })); }} />
-            {errors.found_location && <span className="field-error">{errors.found_location}</span>}
-          </div>
-          <div className="fgroup">
-            <label>Fecha del hallazgo</label>
-            <input type="date" value={form.found_at} onChange={e => set('found_at', e.target.value)} />
-          </div>
-        </div>
-
-        <div className="fgroup">
-          <label>Señas / descripción física</label>
-          <textarea rows={3} placeholder="Ropa, tatuajes, cicatrices, complexión, color de cabello..."
-            value={form.distinguishing_marks} onChange={e => set('distinguishing_marks', e.target.value)} />
-        </div>
-
-        <div className="fgroup">
-          <label>Fotografía</label>
-          {errors.photo && <span className="field-error">{errors.photo}</span>}
-          {photoPreview ? (
-            <div className="photo-preview-sm">
-              <img src={photoPreview} alt="preview" />
-              <button type="button" className="photo-remove-sm" onClick={() => { setPhoto(null); setPhotoPreview(null); if (fileRef.current) fileRef.current.value = ''; }}>✕</button>
-            </div>
-          ) : (
-            <label className="file-upload-label">
-              <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} />
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-              Clic para subir foto
-            </label>
-          )}
-        </div>
-
-        <div className="fgroup">
-          <label>Odontograma <span className="optional-tag">(mejora la identificación)</span></label>
-          <DentalChart value={dentalData} onChange={setDentalData} />
-        </div>
-
-        <div className="fgroup">
-          <label>Notas internas del perito</label>
-          <textarea rows={2} placeholder="Observaciones, condiciones del hallazgo..."
-            value={form.notes} onChange={e => set('notes', e.target.value)} />
-        </div>
-
-        <button type="submit" className="btn-primary" disabled={saving}>
-          {saving ? <><span className="spinner-sm" /> Guardando...</> : 'Guardar Registro Forense'}
-        </button>
-      </form>
     </div>
   );
 }
@@ -595,10 +727,11 @@ export default function AdminDashboard() {
   }, [activeTab]);
 
   const TABS = [
-    { key: 'resumen',    label: 'Resumen' },
-    { key: 'forense',    label: 'Registro Forense' },
-    { key: 'busqueda',   label: `Búsqueda de Coincidencias${stats.pendingMatches > 0 ? ` (${stats.pendingMatches})` : ''}` },
-    { key: 'reportes',   label: 'Archivo' },
+    { key: 'resumen',      label: 'Panel' },
+    { key: 'busqueda',     label: `Coincidencias${stats.pendingMatches > 0 ? ` (${stats.pendingMatches})` : ''}` },
+    { key: 'forense',      label: 'Registrar hallazgo' },
+    { key: 'trazabilidad', label: 'Trazabilidad' },
+    { key: 'reportes',     label: 'Archivo' },
   ];
 
   return (
@@ -658,10 +791,11 @@ export default function AdminDashboard() {
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'resumen'    && <TabResumen stats={stats} onGoTo={setActiveTab} />}
-        {activeTab === 'forense'    && <TabForense userId={user?.id} />}
-        {activeTab === 'busqueda'   && <TabBusqueda userId={user?.id} />}
-        {activeTab === 'reportes'   && <TabReportes />}
+        {activeTab === 'resumen'       && <TabResumen stats={stats} onGoTo={setActiveTab} />}
+        {activeTab === 'forense'       && <TabForense userId={user?.id} />}
+        {activeTab === 'trazabilidad'  && <TabTrazabilidad userId={user?.id} />}
+        {activeTab === 'busqueda'      && <TabBusqueda userId={user?.id} />}
+        {activeTab === 'reportes'      && <TabReportes />}
       </main>
     </div>
   );
